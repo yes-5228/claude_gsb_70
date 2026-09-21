@@ -72,7 +72,7 @@ def get_exceedance(exceedance_id):
 
 @bp.patch("/<int:exceedance_id>")
 def annotate_exceedance(exceedance_id):
-    """单条标注: 确认/忽略/调整等级并填写说明."""
+    """单条标注: 确认/忽略/调整等级并填写说明, 响应附带本次与上一次标注的差异."""
     exceedance = exceedance_service.get_exceedance(exceedance_id)
     data = json_payload()
     validator = Validator(data)
@@ -86,15 +86,17 @@ def annotate_exceedance(exceedance_id):
     annotator = validator.text("annotator", "标注人", required=False, max_length=64)
     validator.raise_if_invalid("标注信息不合法")
 
-    updated = exceedance_service.annotate(
+    updated, changes = exceedance_service.annotate(
         exceedance, status=status, note=note, annotator=annotator, level=level
     )
-    return updated.to_dict()
+    payload = updated.to_dict()
+    payload["changes"] = changes
+    return payload
 
 
 @bp.post("/annotations")
 def batch_annotate():
-    """批量标注: 工作台勾选多条后一次性确认或忽略."""
+    """批量标注: 工作台勾选多条后一次性确认或忽略, 必须填写标注人."""
     data = json_payload()
     validator = Validator(data)
     status = validator.choice(

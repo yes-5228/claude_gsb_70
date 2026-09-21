@@ -3,14 +3,31 @@ from datetime import datetime
 
 from sqlalchemy import cast, func, or_
 
-from ..domain.constants import EXCEEDANCE_LEVEL_LABELS, EXCEEDANCE_STATUS_LABELS
+from ..domain.constants import (
+    EXCEEDANCE_LEVEL_LABELS,
+    EXCEEDANCE_STATUS_LABELS,
+    label_of,
+)
 from ..errors import NotFoundError, ValidationError
 from ..extensions import db
-from ..models import Exceedance, Measurement, Station
+from ..models import Exceedance, ExceedanceAnnotation, Measurement, Station
 from ..models.base import iso
 
 STATUS_CHOICES = tuple(EXCEEDANCE_STATUS_LABELS.keys())
 LEVEL_CHOICES = tuple(EXCEEDANCE_LEVEL_LABELS.keys())
+
+ANNOTATION_FIELD_LABELS = {
+    "status": "标注状态",
+    "level": "超标等级",
+    "note": "标注说明",
+    "annotator": "标注人",
+}
+
+# 统计口径说明: 已忽略记录的去向 (summary 接口同步返回该说明)
+IGNORED_SCOPE_NOTE = (
+    "已忽略记录不参与超标统计(总数/最大与平均超标倍数)、等级分布与高发因子/站点排名, "
+    "仅计入状态分布, 记录本身仍可在列表查询与导出中检索"
+)
 
 
 def _split(value):
@@ -101,41 +118,123 @@ def exceedance_query(args):
     return query.order_by(primary, Exceedance.id.desc())
 
 
-def annotate(exceedance, status=None, note=None, annotator=None, level=None):
-    """Apply a manual annotation to an exceedance record."""
-    if status is not None:
-        if status not in STATUS_CHOICES:
-            raise ValidationError(
-                "标注状态取值不合法, 可选: %s" % ", ".join(STATUS_CHOICES),
-                fields={"status": "unknown"},
-            )
-        exceedance.status = status
-    if level is not None:
-        if level not in LEVEL_CHOICES:
-            raise ValidationError(
-                "超标等级取值不合法, 可选: %s" % ", ".join(LEVEL_CHOICES),
-                fields={"level": "unknown"},
-            )
-        exceedance.level = level
+def _annotation_snapshot(exceedance):
+    return {
+        "status": exceedance.status,
+        "level": exceedance.level,
+        "note": exceedance.note or None,
+        "annotator": exceedance.annotator or None,
+    }
 
-    note = (note or "").strip()
-    if exceedance.status == "pending":
-        exceedance.note = note or exceedance.note
-        exceedance.annotator = annotator or exceedance.annotator
-        exceedance.annotated_at = None if not note else datetime.now()
+
+def _diff_changes(before, after):
+    """前后两次标注快照的差异, 用于接口响应与标注日志."""
+    changes = []
+    for field, label in ANNOTATION_FIELD_LABELS.items():
+        old, new = before.get(field), after.get(field)
+        if old == new:
+            continue
+        change = {"field": field, "label": label, "from": old, "to": new}
+        if field == "status":
+            change["from_label"] = label_of(EXCEEDANCE_STATUS_LABELS, old) if old else "未标注"
+            change["to_label"] = label_of(EXCEEDANCE_STATUS_LABELS, new) if new else "未标注"
+        elif field == "level":
+            change["from_label"] = label_of(EXCEEDANCE_LEVEL_LABELS, old) if old else None
+            change["to_label"] = label_of(EXCEEDANCE_LEVEL_LABELS, new) if new else None
+        changes.append(change)
+    return changes
+
+
+def _apply_annotation(exceedance, status=None, level=None, note=None, annotator=None):
+    """Apply one annotation action and return the change list (empty when no-op).
+
+    每次有效变更都会写入一条 ExceedanceAnnotation 日志(操作人/时间/说明/前后差异);
+    没有任何变化的调用视为无操作, 不要求操作人, 也不产生日志.
+    """
+    target_status = status or exceedance.status
+    target_level = level or exceedance.level
+    note = (note or "").strip() or None
+    annotator = (annotator or "").strip()
+
+    if target_status not in STATUS_CHOICES:
+        raise ValidationError(
+            "标注状态取值不合法, 可选: %s" % ", ".join(STATUS_CHOICES),
+            fields={"status": "unknown"},
+        )
+    if target_level not in LEVEL_CHOICES:
+        raise ValidationError(
+            "超标等级取值不合法, 可选: %s" % ", ".join(LEVEL_CHOICES),
+            fields={"level": "unknown"},
+        )
+
+    before = _annotation_snapshot(exceedance)
+    resetting = target_status == "pending" and exceedance.status != "pending"
+    note_changed = note is not None and note != before["note"]
+    if (
+        not resetting
+        and target_status == before["status"]
+        and target_level == before["level"]
+        and not note_changed
+    ):
+        return []
+
+    errors = {}
+    if not annotator:
+        errors["annotator"] = "required"
+    if target_status != "pending" and not note:
+        errors["note"] = "required"
+    if errors:
+        parts = []
+        if "annotator" in errors:
+            parts.append("标注人不能为空")
+        if "note" in errors:
+            reason = "确认" if target_status == "confirmed" else "忽略"
+            parts.append(
+                "标注为\"%s\"时必须填写%s原因" % (EXCEEDANCE_STATUS_LABELS[target_status], reason)
+            )
+        raise ValidationError(", ".join(parts), fields=errors)
+
+    now = datetime.now()
+    exceedance.status = target_status
+    exceedance.level = target_level
+    if resetting:
+        # 重置为待标注: 清空记录上的标注快照, 操作痕迹保留在标注日志中
+        exceedance.note = None
+        exceedance.annotator = None
+        exceedance.annotated_at = None
     else:
-        if not note:
-            reason = "确认" if exceedance.status == "confirmed" else "忽略"
-            raise ValidationError(
-                "标注为\"%s\"时必须填写%s原因" % (EXCEEDANCE_STATUS_LABELS[exceedance.status], reason),
-                fields={"note": "required"},
-            )
-        exceedance.note = note
-        exceedance.annotator = annotator or "未署名"
-        exceedance.annotated_at = datetime.now()
+        if note is not None:
+            exceedance.note = note
+        exceedance.annotator = annotator
+        exceedance.annotated_at = now
 
+    changes = _diff_changes(before, _annotation_snapshot(exceedance))
+    db.session.add(
+        ExceedanceAnnotation(
+            exceedance_id=exceedance.id,
+            annotator=annotator,
+            note=note,
+            status_from=before["status"],
+            status_to=exceedance.status,
+            level_from=before["level"],
+            level_to=exceedance.level,
+            changes=changes,
+            created_at=now,
+        )
+    )
+    return changes
+
+
+def annotate(exceedance, status=None, note=None, annotator=None, level=None):
+    """Apply a manual annotation to an exceedance record.
+
+    Returns ``(exceedance, changes)``: changes 为本次操作相对上一次标注的逐字段差异.
+    """
+    changes = _apply_annotation(
+        exceedance, status=status, level=level, note=note, annotator=annotator
+    )
     db.session.commit()
-    return exceedance
+    return exceedance, changes
 
 
 def annotate_batch(ids, status, note=None, annotator=None, level=None):
@@ -148,48 +247,64 @@ def annotate_batch(ids, status, note=None, annotator=None, level=None):
     found = {record.id for record in records}
     missing = [item for item in ids if item not in found]
 
+    note_text = (note or "").strip()
+    annotator = (annotator or "").strip()
+    if status != "pending" and not note_text:
+        raise ValidationError(
+            "批量标注为\"%s\"时必须填写标注说明"
+            % EXCEEDANCE_STATUS_LABELS.get(status, status),
+            fields={"note": "required"},
+        )
+    if records and not annotator:
+        raise ValidationError(
+            "批量标注必须填写标注人, 以便事后追溯", fields={"annotator": "required"}
+        )
+
     updated = []
+    changed = 0
     for record in records:
-        annotate_silent = {
-            "status": status if status is not None else record.status,
-            "level": level if level is not None else record.level,
-            "note": note,
-            "annotator": annotator,
-        }
-        if annotate_silent["status"] != "pending" and not (note or "").strip():
-            raise ValidationError(
-                "批量标注为\"%s\"时必须填写标注说明"
-                % EXCEEDANCE_STATUS_LABELS.get(annotate_silent["status"], annotate_silent["status"]),
-                fields={"note": "required"},
-            )
-        record.status = annotate_silent["status"]
-        record.level = annotate_silent["level"]
-        if (note or "").strip():
-            record.note = note.strip()
-        if annotate_silent["status"] == "pending":
-            record.annotated_at = None
-        else:
-            record.annotator = annotator or record.annotator or "未署名"
-            record.annotated_at = datetime.now()
+        changes = _apply_annotation(
+            record, status=status, level=level, note=note_text, annotator=annotator
+        )
+        if changes:
+            changed += 1
         updated.append(record.id)
 
     db.session.commit()
-    return {"updated": len(updated), "updated_ids": updated, "missing": missing}
+    return {
+        "updated": len(updated),
+        "updated_ids": updated,
+        "changed": changed,
+        "missing": missing,
+    }
 
 
 def summary(args):
-    """Dashboard counters for the annotation work bench."""
+    """Dashboard counters for the annotation work bench.
+
+    统计口径(已忽略记录的去向):
+    - 不参与: 超标记录总数 total、最大/平均超标倍数、等级分布 by_level、
+      高发因子排名 top_pollutants、高发站点排名 top_stations;
+    - 仍参与: 状态分布 by_status 与 ignored 计数(标注工作量统计),
+      且记录本身仍可在列表查询、详情与导出中检索;
+    - 首页概览的超标卡片复用本函数, 口径一致.
+    """
     base = exceedance_query(args)
-    subquery = base.with_entities(Exceedance.id, Exceedance.station_id,
-                                  Exceedance.status, Exceedance.level,
-                                  Exceedance.pollutant, Exceedance.exceed_ratio).subquery()
+    effective = base.filter(Exceedance.status != "ignored").order_by(None)
+    subquery = effective.with_entities(
+        Exceedance.id, Exceedance.station_id, Exceedance.level,
+        Exceedance.pollutant, Exceedance.exceed_ratio,
+    ).subquery()
 
     by_status = {
         status: {"key": status, "label": label, "count": 0}
         for status, label in EXCEEDANCE_STATUS_LABELS.items()
     }
     for status, count in (
-        db.session.query(subquery.c.status, func.count()).group_by(subquery.c.status).all()
+        base.order_by(None)
+        .with_entities(Exceedance.status, func.count())
+        .group_by(Exceedance.status)
+        .all()
     ):
         if status in by_status:
             by_status[status]["count"] = int(count)
@@ -242,6 +357,7 @@ def summary(args):
 
     return {
         "total": int(totals[0] or 0),
+        "ignored": by_status["ignored"]["count"],
         "pending": by_status["pending"]["count"],
         "by_status": list(by_status.values()),
         "by_level": list(by_level.values()),
@@ -249,5 +365,7 @@ def summary(args):
         "top_stations": top_stations,
         "max_ratio": round(float(totals[1] or 0), 3),
         "avg_ratio": round(float(totals[2] or 0), 3),
+        "ignored_excluded": True,
+        "scope_note": IGNORED_SCOPE_NOTE,
         "generated_at": iso(datetime.now()),
     }

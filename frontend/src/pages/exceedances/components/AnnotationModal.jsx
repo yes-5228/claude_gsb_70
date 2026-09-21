@@ -15,6 +15,12 @@ const STATUS_CHOICES = [
   { value: 'pending', label: '保持待标注', hint: '暂不处理, 保留在待办列表' }
 ]
 
+const FIELD_ERROR_TEXT = { required: '此项不能为空' }
+const fieldError = (code) => FIELD_ERROR_TEXT[code] || code
+
+const changeText = (change) =>
+  `${change.label}: ${change.from_label ?? change.from ?? '空'} → ${change.to_label ?? change.to ?? '空'}`
+
 export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
   const toast = useToast()
   const loader = useCallback(() => getExceedance(exceedanceId), [exceedanceId])
@@ -37,16 +43,23 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
   }, [data])
 
   const submit = async () => {
+    if (!form.annotator.trim()) {
+      setErrors((prev) => ({ ...prev, annotator: 'required' }))
+      setMessage('标注动作必须留下操作人, 请填写标注人')
+      return
+    }
     setBusy(true)
     setMessage(null)
     try {
-      await annotateExceedance(exceedanceId, {
+      const result = await annotateExceedance(exceedanceId, {
         status: form.status,
         level: form.level || null,
         note: form.note || null,
-        annotator: form.annotator || null
+        annotator: form.annotator.trim()
       })
-      toast.success('标注已保存')
+      const changes = result?.changes || []
+      const diffText = changes.map(changeText).join('; ')
+      toast.success(diffText ? `标注已保存 (${diffText})` : '标注已保存, 标注内容无变化')
       onSaved?.()
     } catch (err) {
       setErrors(err.fields || {})
@@ -116,7 +129,42 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
             <dd>
               {measurement?.recorder || '-'} · {measurement?.data_source_label || '-'}
             </dd>
+            <dt>最近标注</dt>
+            <dd>
+              {data.annotator
+                ? `${data.annotator} · ${formatDateTime(data.annotated_at)} · ${data.status_label}`
+                : '尚未标注'}
+            </dd>
           </dl>
+
+          <div className="stack" style={{ gap: 8 }}>
+            <span className="field-label">
+              标注历史{data.annotations?.length ? ` (${data.annotations.length} 次, 最新在前)` : ''}
+            </span>
+            {data.annotations?.length ? (
+              data.annotations.map((entry) => (
+                <div key={entry.id} className="card" style={{ boxShadow: 'none' }}>
+                  <div className="card-body tight stack" style={{ gap: 6 }}>
+                    <div className="inline" style={{ gap: 8 }}>
+                      <Tag tone={EXCEEDANCE_STATUS_TONE[entry.status_to]}>{entry.status_to_label}</Tag>
+                      <span className="strong">{entry.annotator}</span>
+                      <span className="small muted">{formatDateTime(entry.created_at)}</span>
+                    </div>
+                    {entry.changes?.length ? (
+                      <div className="small">
+                        {entry.changes.map((change) => (
+                          <div key={change.field}>{changeText(change)}</div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {entry.note ? <div className="small muted">说明: {entry.note}</div> : null}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <Alert tone="info">本条记录尚无标注历史, 首次标注后将在此留下操作人、时间与说明。</Alert>
+            )}
+          </div>
 
           {message ? <Alert tone="error">{message}</Alert> : null}
 
@@ -153,10 +201,11 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
                 <option value="severe">重度超标</option>
               </select>
             </Field>
-            <Field label="标注人" error={errors.annotator}>
+            <Field label="标注人" required error={fieldError(errors.annotator)}>
               <Input
                 value={form.annotator}
                 onChange={(event) => setForm({ ...form, annotator: event.target.value })}
+                invalid={Boolean(errors.annotator)}
                 placeholder="如: 王敏"
               />
             </Field>
@@ -165,7 +214,7 @@ export default function AnnotationModal({ exceedanceId, onClose, onSaved }) {
           <Field
             label="标注说明"
             required={form.status !== 'pending'}
-            error={errors.note}
+            error={fieldError(errors.note)}
             hint="确认或忽略时必须填写原因, 便于后续追溯"
           >
             <Textarea

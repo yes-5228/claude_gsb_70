@@ -47,15 +47,26 @@ export default function ExceedancesPage() {
       toast.warning('请先勾选需要标注的超标记录')
       return
     }
+    if (!batch.annotator.trim()) {
+      toast.warning('请填写标注人, 批量标注需要留下操作人以便追溯')
+      return
+    }
+    if (batch.status !== 'pending' && !batch.note.trim()) {
+      toast.warning('批量确认或忽略时必须填写标注说明')
+      return
+    }
     setBusy(true)
     try {
       const result = await batchAnnotate({
         ids: selected,
         status: batch.status,
         note: batch.note || null,
-        annotator: batch.annotator || null
+        annotator: batch.annotator.trim()
       })
-      toast.success(`已标注 ${result.updated} 条记录`)
+      const unchanged = result.updated - (result.changed ?? result.updated)
+      toast.success(
+        `已标注 ${result.changed ?? result.updated} 条记录${unchanged > 0 ? `, ${unchanged} 条内容无变化` : ''}`
+      )
       if (result.missing?.length) toast.warning(`有 ${result.missing.length} 条记录不存在, 已跳过`)
       setSelected([])
       setBatch((prev) => ({ ...prev, note: '' }))
@@ -123,7 +134,7 @@ export default function ExceedancesPage() {
                 <input
                   className="input"
                   style={{ width: 140 }}
-                  placeholder="标注人"
+                  placeholder="标注人 (必填)"
                   value={batch.annotator}
                   onChange={(event) => setBatch({ ...batch, annotator: event.target.value })}
                 />

@@ -20,7 +20,11 @@ export default function ExceedanceSummaryCards({ summary }) {
 
   return (
     <div className="stat-grid">
-      <StatCard label="筛选范围内超标记录" value={summary.total} foot={`最大超标倍数 ${formatRatio(summary.max_ratio)}`} />
+      <StatCard
+        label="有效超标记录"
+        value={summary.total}
+        foot={`已忽略 ${summary.ignored ?? 0} 条不计入 · 最大超标倍数 ${formatRatio(summary.max_ratio)}`}
+      />
       <StatCard
         label="待标注"
         value={summary.pending}
@@ -36,7 +40,11 @@ export default function ExceedanceSummaryCards({ summary }) {
           .map(([key, label]) => `${label} ${byLevel[key] || 0}`)
           .join(' · ')}
       />
-      <StatCard label="平均超标倍数" value={formatRatio(summary.avg_ratio)} foot={topPollutants ? `高发因子: ${topPollutants}` : '暂无统计'} />
+      <StatCard
+        label="平均超标倍数"
+        value={formatRatio(summary.avg_ratio)}
+        foot={topPollutants ? `高发因子(不含已忽略): ${topPollutants}` : '暂无统计'}
+      />
     </div>
   )
 }
