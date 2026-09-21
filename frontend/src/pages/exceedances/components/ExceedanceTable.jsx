@@ -55,13 +55,14 @@ export default function ExceedanceTable({
     },
     {
       key: 'note',
-      title: '标注说明',
+      title: '最近标注',
       render: (row) => (
         <div style={{ maxWidth: 260 }}>
-          <div className="small">{row.note || <span className="muted">未填写</span>}</div>
+          <div className="small">{row.note || <span className="muted">未标注</span>}</div>
           {row.annotator ? (
             <div className="small muted">
               {row.annotator} · {formatDateTime(row.annotated_at)}
+              {row.annotation_count > 1 ? ` · 共 ${row.annotation_count} 次标注` : ''}
             </div>
           ) : null}
         </div>

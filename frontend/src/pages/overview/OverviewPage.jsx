@@ -61,10 +61,10 @@ export default function OverviewPage() {
           foot={`覆盖 ${measurements.station_count} 个监测点 · 均值 ${formatNumber(measurements.avg_value)}`}
         />
         <StatCard
-          label="超标记录"
-          value={exceedances.total}
-          tone={exceedances.total ? 'danger' : undefined}
-          foot={`超标率 ${formatPercent(measurements.exceed_rate)} · 最大 ${formatRatio(exceedances.max_ratio)}`}
+          label="有效超标记录"
+          value={exceedances.effective_total ?? exceedances.total}
+          tone={(exceedances.effective_total ?? exceedances.total) ? 'danger' : undefined}
+          foot={`超标率 ${formatPercent(measurements.exceed_rate)} · 最大 ${formatRatio(exceedances.max_ratio)}${exceedances.ignored_total ? ` · 已忽略 ${exceedances.ignored_total} 条不计入` : ''}`}
         />
         <StatCard
           label="待标注超标"

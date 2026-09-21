@@ -46,6 +46,22 @@ def export_exceedances():
     rows = exceedance_service.exceedance_query(request.args).limit(
         current_app.config["MAX_EXPORT_ROWS"]
     ).all()
+
+    def annotation_trail(row):
+        """历次标注的操作人 / 时间 / 结论, 便于离线追溯。"""
+        parts = []
+        for log in reversed(row.annotations):
+            parts.append(
+                "%s %s %s: %s"
+                % (
+                    log.created_at.strftime("%Y-%m-%d %H:%M"),
+                    log.annotator,
+                    log.to_dict()["action_label"],
+                    (log.note or "").replace("\n", " "),
+                )
+            )
+        return " | ".join(parts)
+
     columns = [
         ("站点编码", lambda row: row.station.code if row.station else ""),
         ("站点名称", lambda row: row.station.name if row.station else ""),
@@ -56,10 +72,12 @@ def export_exceedances():
         ("超标等级", lambda row: EXCEEDANCE_LEVEL_LABELS.get(row.level, row.level)),
         ("标注状态", lambda row: EXCEEDANCE_STATUS_LABELS.get(row.status, row.status)),
         ("监测时间", lambda row: row.measured_at.strftime("%Y-%m-%d %H:%M")),
-        ("标注说明", "note"),
-        ("标注人", "annotator"),
-        ("标注时间", lambda row: row.annotated_at.strftime("%Y-%m-%d %H:%M")
+        ("最近标注说明", "note"),
+        ("最近标注人", "annotator"),
+        ("最近标注时间", lambda row: row.annotated_at.strftime("%Y-%m-%d %H:%M")
             if row.annotated_at else ""),
+        ("标注次数", lambda row: len(row.annotations)),
+        ("标注留痕", annotation_trail),
     ]
     return csv_response(rows, columns, "exceedance_records")
 
@@ -72,7 +90,7 @@ def get_exceedance(exceedance_id):
 
 @bp.patch("/<int:exceedance_id>")
 def annotate_exceedance(exceedance_id):
-    """单条标注: 确认/忽略/调整等级并填写说明."""
+    """单条标注: 确认/忽略/调整等级并填写说明, 每次动作均留痕."""
     exceedance = exceedance_service.get_exceedance(exceedance_id)
     data = json_payload()
     validator = Validator(data)
@@ -83,7 +101,7 @@ def annotate_exceedance(exceedance_id):
         "level", "超标等级", choices=tuple(EXCEEDANCE_LEVEL_LABELS.keys()), required=False
     )
     note = validator.text("note", "标注说明", required=False, max_length=1000)
-    annotator = validator.text("annotator", "标注人", required=False, max_length=64)
+    annotator = validator.text("annotator", "标注人", required=True, max_length=64)
     validator.raise_if_invalid("标注信息不合法")
 
     updated = exceedance_service.annotate(
@@ -94,7 +112,7 @@ def annotate_exceedance(exceedance_id):
 
 @bp.post("/annotations")
 def batch_annotate():
-    """批量标注: 工作台勾选多条后一次性确认或忽略."""
+    """批量标注: 工作台勾选多条后一次性确认或忽略, 统一留痕."""
     data = json_payload()
     validator = Validator(data)
     status = validator.choice(
@@ -104,7 +122,7 @@ def batch_annotate():
         "level", "超标等级", choices=tuple(EXCEEDANCE_LEVEL_LABELS.keys()), required=False
     )
     note = validator.text("note", "标注说明", required=False, max_length=1000)
-    annotator = validator.text("annotator", "标注人", required=False, max_length=64)
+    annotator = validator.text("annotator", "标注人", required=True, max_length=64)
     validator.raise_if_invalid("标注信息不合法")
 
     ids = list_payload("ids", data)

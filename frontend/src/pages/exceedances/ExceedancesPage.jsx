@@ -47,15 +47,24 @@ export default function ExceedancesPage() {
       toast.warning('请先勾选需要标注的超标记录')
       return
     }
+    if (!batch.annotator.trim()) {
+      toast.warning('请填写标注人, 批量操作同样需要留痕')
+      return
+    }
+    if (batch.status !== 'pending' && !batch.note.trim()) {
+      toast.warning(batch.status === 'ignored' ? '批量忽略必须填写标注说明' : '批量确认必须填写标注说明')
+      return
+    }
     setBusy(true)
     try {
       const result = await batchAnnotate({
         ids: selected,
         status: batch.status,
         note: batch.note || null,
-        annotator: batch.annotator || null
+        annotator: batch.annotator
       })
       toast.success(`已标注 ${result.updated} 条记录`)
+      if (result.unchanged?.length) toast.info(`${result.unchanged.length} 条与当前标注一致, 未产生新留痕`)
       if (result.missing?.length) toast.warning(`有 ${result.missing.length} 条记录不存在, 已跳过`)
       setSelected([])
       setBatch((prev) => ({ ...prev, note: '' }))
@@ -88,7 +97,7 @@ export default function ExceedancesPage() {
 
       <SectionCard
         title="超标记录工作台"
-        hint="点击行可打开单条标注; 勾选多条后可批量确认或忽略"
+        hint="点击行可打开单条标注并查看历史留痕; 勾选多条后可批量确认或忽略; 已忽略记录不参与超标等级、高发因子与站点排名"
         actions={
           <>
             <Tag tone="primary">已选 {selected.length} 条</Tag>
@@ -123,7 +132,7 @@ export default function ExceedancesPage() {
                 <input
                   className="input"
                   style={{ width: 140 }}
-                  placeholder="标注人"
+                  placeholder="标注人 (必填)"
                   value={batch.annotator}
                   onChange={(event) => setBatch({ ...batch, annotator: event.target.value })}
                 />

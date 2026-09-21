@@ -6,6 +6,7 @@ from ..domain.constants import (
     label_of,
 )
 from ..extensions import db
+from .annotation_log import AnnotationLog
 from .base import TimestampMixin, iso
 
 
@@ -36,6 +37,14 @@ class Exceedance(TimestampMixin, db.Model):
 
     measurement = db.relationship("Measurement", back_populates="exceedance")
     station = db.relationship("Station", back_populates="exceedances")
+    # 每次人工标注动作都会追加一条不可变留痕, 按时间倒序便于取最近一次
+    annotations = db.relationship(
+        "AnnotationLog",
+        back_populates="exceedance",
+        cascade="all, delete-orphan",
+        order_by=(AnnotationLog.created_at.desc(), AnnotationLog.id.desc()),
+        lazy="selectin",
+    )
 
     def to_dict(self, include_relations=False):
         payload = {
@@ -62,9 +71,13 @@ class Exceedance(TimestampMixin, db.Model):
             "station_name": self.station.name if self.station else None,
             "station_code": self.station.code if self.station else None,
             "unit": self.measurement.unit if self.measurement else None,
+            "annotation_count": len(self.annotations),
+            "last_annotation": self.annotations[0].to_dict() if self.annotations else None,
         }
-        if include_relations and self.measurement:
-            payload["measurement"] = self.measurement.to_dict(include_station=True)
+        if include_relations:
+            payload["annotations"] = [item.to_dict() for item in self.annotations]
+            if self.measurement:
+                payload["measurement"] = self.measurement.to_dict(include_station=True)
         return payload
 
     def __repr__(self):

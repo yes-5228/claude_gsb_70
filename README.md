@@ -11,7 +11,7 @@
 | 运行概览 | `/overview` | 监测点规模、数据总量、超标与待标注统计、近 7 日数据量趋势、待办超标列表 |
 | 监测点台账 | `/stations` | 台账增删改查、区域/类型/状态筛选、点位详情与分因子统计、级联清理关联数据 |
 | 监测数据录入 | `/measurements` | 按“监测点 + 时刻 + 周期”成组录入多因子浓度、超标校验预览、重复数据覆盖、录入结果回执 |
-| 超标记录标注 | `/exceedances` | 超标自动建单、单条/批量标注(确认 / 忽略 / 重置)、等级人工修正、标注留痕与统计 |
+| 超标记录标注 | `/exceedances` | 超标自动建单、单条/批量标注(确认 / 忽略 / 重置)、等级人工修正、标注全程留痕(操作人/时间/说明/前后值)与分口径统计 |
 | 数据查询 | `/query` | 多条件组合检索、聚合统计(按因子/站点/区域/日/月等)、分页浏览、CSV 导出 |
 
 设计要点:
@@ -28,7 +28,7 @@
 | 数据库 | SQLite(默认, 零依赖) / PostgreSQL 16(可选, compose 覆盖文件) |
 | 前端 | React 18 · React Router 6 · Vite 7 · Axios · 原生 CSS(设计令牌 + 组件类) |
 | 部署 | Docker 多阶段构建 · Nginx 静态托管与 `/api` 反向代理 · docker compose |
-| 测试 | Pytest(43 个后端用例: 接口 + 领域规则) |
+| 测试 | Pytest(51 个后端用例: 接口 + 领域规则) |
 
 ## 目录结构
 
@@ -139,7 +139,16 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 - **判定**: `监测值 > 限值` 即判为超标, 记录限值快照与原值, 避免限值调整后历史数据失真。
 - **分级**: 超标倍数 = 监测值 / 限值; `1.0 ~ 1.5 倍` 为轻度超标, `1.5 ~ 2.0 倍` 为中度超标, `≥ 2.0 倍` 为重度超标。
 - **无 1 小时限值的因子**(PM2.5、PM10 小时值)仅记录数值, 不参与超标判定, 避免误报。
-- **标注状态**: `待标注(pending)` 由系统自动创建, 人工标注为 `已确认(confirmed)` 或 `已忽略(ignored)`; 确认与忽略都必须填写标注说明, 用于后续追溯。
+- **标注状态**: `待标注(pending)` 由系统自动创建, 人工标注为 `已确认(confirmed)` 或 `已忽略(ignored)`; 确认与忽略都必须填写**操作人**和**标注说明**, 用于后续追溯。
+
+### 标注留痕与统计口径
+
+- **每次标注动作都留痕**: 确认 / 忽略 / 重置 / 修正等级都会向 `annotation_logs` 追加一条**不可变**记录, 包含操作人、操作时间、说明、动作类型以及标注前后的状态与等级; `exceedances` 表上的 `status / level / note / annotator / annotated_at` 仅保存最近一次标注的快照。同一条记录再次标注后, 可在标注弹窗的“标注留痕”中看清前后两次的差别(旧值划掉 → 新值)。与当前标注完全一致的重复提交不产生新留痕。
+- **重置为待标注**: 清空最近标注快照回到待办, 但历史留痕保留, 事后仍能查到是谁在什么时候重置过。
+- **忽略后的统计口径**(规则集中在 `exceedance_service.summary`):
+  - **仍参与**: 超标台账与列表、按标注状态的分布统计(`by_status`, 忽略记录计入 `ignored` 分桶)、状态筛选与检索、CSV 导出(含历次标注留痕)。
+  - **不参与**: 超标等级分布、平均/最大超标倍数、高发因子排名、站点排名 —— 即 `effective_total / by_level / top_pollutants / top_stations / max_ratio / avg_ratio` 只统计 `待标注 + 已确认` 记录, 避免设备异常等误报污染超标统计。
+  - 汇总接口同时返回 `total`(全部记录, 含已忽略) 与 `effective_total`(有效超标, 不含已忽略), 前端概览与工作台卡片以后者为准。
 
 ## API 概览
 
@@ -161,10 +170,10 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | DELETE | `/api/measurements/{id}` | 删除监测数据 |
 | GET | `/api/measurements/export` | 按条件导出 CSV |
 | GET | `/api/exceedances` | 超标记录查询(含筛选统计) |
-| GET | `/api/exceedances/{id}` | 超标记录详情(含关联监测数据) |
-| PATCH | `/api/exceedances/{id}` | 单条标注 |
-| POST | `/api/exceedances/annotations` | 批量标注 |
-| GET | `/api/exceedances/summary` | 超标统计(状态/等级/高发因子/站点排名) |
+| GET | `/api/exceedances/{id}` | 超标记录详情(含关联监测数据与历次标注留痕) |
+| PATCH | `/api/exceedances/{id}` | 单条标注(必须带 `annotator`; 确认/忽略必须带 `note`; 追加留痕) |
+| POST | `/api/exceedances/annotations` | 批量标注(同样要求操作人, 返回 `updated/unchanged/missing`) |
+| GET | `/api/exceedances/summary` | 超标统计: `total` 含已忽略; 等级/倍数/高发因子/站点排名仅计待标注+已确认 |
 | GET | `/api/query/measurements` | 高级条件检索 |
 | GET | `/api/query/statistics` | 聚合统计(`group_by` + `metric`) |
 | GET | `/api/query/export` | 查询结果导出 CSV |
@@ -206,7 +215,8 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 | --- | --- | --- |
 | `stations` | `code`(唯一) `name` `area` `station_type` `status` `longitude/latitude` `installed_at` | 监测点台账 |
 | `measurements` | `station_id` `pollutant` `period` `value` `limit_value` `exceed_ratio` `is_exceeded` `measured_at` `data_source` `recorder` | 监测数据; `(station_id, pollutant, period, measured_at)` 唯一 |
-| `exceedances` | `measurement_id`(唯一) `status` `level` `note` `annotator` `annotated_at` | 超标记录与人工标注 |
+| `exceedances` | `measurement_id`(唯一) `status` `level` `note` `annotator` `annotated_at` | 超标记录; 后五字段为最近一次标注快照 |
+| `annotation_logs` | `exceedance_id` `action` `from_status/to_status` `from_level/to_level` `note` `annotator` `created_at` | 标注操作留痕(追加不可变), 记录操作人/时间/说明与前后值 |
 
 删除监测点会级联清理其监测数据与超标记录; 删除监测数据会同时删除对应超标记录。
 
@@ -228,7 +238,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 ```bash
 cd backend
-python -m pytest -q          # 43 个用例: 台账 CRUD/级联、录入与超标判定、标注规则、查询统计与导出、元数据接口
+python -m pytest -q          # 51 个用例: 台账 CRUD/级联、录入与超标判定、标注留痕与统计口径、查询统计与导出、元数据接口
 
 cd frontend
 npm run build                # 生产构建校验
